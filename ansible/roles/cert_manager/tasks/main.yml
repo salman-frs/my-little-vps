@@ -1,0 +1,63 @@
+---
+- name: Determine Helm architecture
+  ansible.builtin.set_fact:
+    cert_manager_helm_arch: "{{ 'amd64' if ansible_facts.architecture == 'x86_64' else 'arm64' }}"
+
+- name: Check installed Helm version
+  ansible.builtin.command: /usr/local/bin/helm version --template {{ "'{{ .Version }}'" }}
+  changed_when: false
+  failed_when: false
+  register: cert_manager_helm_version_check
+
+- name: Download Helm archive when needed
+  ansible.builtin.get_url:
+    url: "https://get.helm.sh/helm-{{ helm_version }}-linux-{{ cert_manager_helm_arch }}.tar.gz"
+    dest: "/tmp/helm-{{ helm_version }}-linux-{{ cert_manager_helm_arch }}.tar.gz"
+    mode: "0644"
+  when: cert_manager_helm_version_check.rc != 0 or cert_manager_helm_version_check.stdout != helm_version
+
+- name: Extract Helm archive when needed
+  ansible.builtin.unarchive:
+    src: "/tmp/helm-{{ helm_version }}-linux-{{ cert_manager_helm_arch }}.tar.gz"
+    dest: "/tmp/helm-{{ helm_version }}"
+    remote_src: true
+  when: cert_manager_helm_version_check.rc != 0 or cert_manager_helm_version_check.stdout != helm_version
+
+- name: Install Helm binary when needed
+  ansible.builtin.copy:
+    src: "/tmp/helm-{{ helm_version }}/linux-{{ cert_manager_helm_arch }}/helm"
+    dest: /usr/local/bin/helm
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: cert_manager_helm_version_check.rc != 0 or cert_manager_helm_version_check.stdout != helm_version
+
+- name: Install or upgrade cert-manager
+  ansible.builtin.command: >-
+    /usr/local/bin/helm upgrade --install cert-manager
+    oci://quay.io/jetstack/charts/cert-manager
+    --version {{ cert_manager_version }}
+    --namespace {{ cert_manager_namespace }}
+    --create-namespace
+    --set crds.enabled=true
+    --wait
+    --timeout 10m
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+    K3S_CONFIG_FILE: /dev/null
+  changed_when: false
+
+- name: Wait for cert-manager deployments
+  ansible.builtin.command: >-
+    /usr/local/bin/kubectl -n {{ cert_manager_namespace }} rollout status
+    deployment/{{ item }}
+    --timeout=300s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+    K3S_CONFIG_FILE: /dev/null
+  changed_when: false
+  loop:
+    - cert-manager
+    - cert-manager-cainjector
+    - cert-manager-webhook

@@ -1,0 +1,13 @@
+cluster-init: true
+node-name: "{{ k3s_node_name }}"
+node-external-ip: "{{ public_ip }}"
+flannel-backend: "vxlan"
+selinux: true
+secrets-encryption: true
+etcd-snapshot-compress: true
+etcd-snapshot-schedule-cron: "{{ k3s_snapshot_schedule }}"
+etcd-snapshot-retention: {{ k3s_snapshot_retention }}
+tls-san:
+{% for san in k3s_tls_sans %}
+  - "{{ san }}"
+{% endfor %}

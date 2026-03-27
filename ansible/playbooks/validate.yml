@@ -1,0 +1,372 @@
+---
+- name: Validate single-node K3s VPS host
+  hosts: k3s_servers
+  become: true
+  gather_facts: true
+
+  vars:
+    kube_env:
+      KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      K3S_CONFIG_FILE: /dev/null
+
+  tasks:
+    - name: Collect service facts
+      ansible.builtin.service_facts:
+
+    - name: Assert k3s service is running
+      ansible.builtin.assert:
+        that:
+          - "'k3s.service' in ansible_facts.services"
+          - ansible_facts.services['k3s.service'].state == 'running'
+        fail_msg: k3s.service is not running on the target host
+
+    - name: Wait for K3s node readiness
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl wait
+        --for=condition=Ready
+        node/{{ k3s_node_name }}
+        --timeout=300s
+      environment: "{{ kube_env }}"
+      changed_when: false
+
+    - name: Wait for kube-system deployments to be healthy
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl -n kube-system rollout status
+        deployment/{{ item }}
+        --timeout=300s
+      environment: "{{ kube_env }}"
+      changed_when: false
+      loop:
+        - coredns
+        - metrics-server
+        - local-path-provisioner
+        - traefik
+
+    - name: Wait for cert-manager deployments to be healthy
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl -n {{ cert_manager_namespace }} rollout status
+        deployment/{{ item }}
+        --timeout=300s
+      environment: "{{ kube_env }}"
+      changed_when: false
+      loop:
+        - cert-manager
+        - cert-manager-cainjector
+        - cert-manager-webhook
+      when: cert_manager_enabled | bool
+
+    - name: Read firewall ports
+      ansible.builtin.command: firewall-cmd --list-ports
+      changed_when: false
+      register: firewall_ports
+
+    - name: Read trusted firewall sources
+      ansible.builtin.command: firewall-cmd --zone=trusted --list-sources
+      changed_when: false
+      register: firewall_sources
+
+    - name: Assert firewall state
+      ansible.builtin.assert:
+        that:
+          - (ssh_port | string) ~ '/tcp' in firewall_ports.stdout
+          - "'80/tcp' in firewall_ports.stdout"
+          - "'443/tcp' in firewall_ports.stdout"
+          - "'6443/tcp' in firewall_ports.stdout"
+          - pod_cidr in firewall_sources.stdout
+          - service_cidr in firewall_sources.stdout
+        fail_msg: firewalld does not expose the expected ports or trusted CIDRs
+
+    - name: Verify etcd snapshots are available
+      ansible.builtin.set_fact:
+        validation_snapshot_name: "validation-{{ ansible_facts.date_time.epoch }}"
+
+    - name: Create a manual etcd snapshot
+      ansible.builtin.command: >-
+        /usr/local/bin/k3s etcd-snapshot save
+        --name {{ validation_snapshot_name }}
+      environment:
+        K3S_CONFIG_FILE: /dev/null
+      changed_when: true
+
+    - name: List etcd snapshots
+      ansible.builtin.command: /usr/local/bin/k3s etcd-snapshot ls
+      environment:
+        K3S_CONFIG_FILE: /dev/null
+      changed_when: false
+      register: etcd_snapshots
+
+    - name: Assert the validation snapshot exists
+      ansible.builtin.assert:
+        that:
+          - validation_snapshot_name in etcd_snapshots.stdout
+        fail_msg: Manual etcd snapshot was not listed by k3s etcd-snapshot ls
+
+    - name: Validate admin kubeconfig
+      ansible.builtin.command: /usr/local/bin/kubectl get node {{ k3s_node_name }} -o name
+      become: true
+      become_user: "{{ admin_user }}"
+      environment:
+        KUBECONFIG: "/home/{{ admin_user }}/.kube/config"
+        K3S_CONFIG_FILE: /dev/null
+      changed_when: false
+      register: admin_kubeconfig_check
+
+    - name: Assert admin kubeconfig can reach the cluster
+      ansible.builtin.assert:
+        that:
+          - admin_kubeconfig_check.stdout == ('node/' ~ k3s_node_name)
+        fail_msg: Admin kubeconfig could not read the target node
+
+    - name: Wait for OpenClaw deployment rollout
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl -n {{ openclaw_namespace }} rollout status
+        deployment/openclaw
+        --timeout=900s
+      environment: "{{ kube_env }}"
+      changed_when: false
+      when: openclaw_enabled | bool
+
+    - name: Read OpenClaw PVC phase
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl -n {{ openclaw_namespace }} get pvc openclaw-home-pvc
+        -o jsonpath={.status.phase}
+      environment: "{{ kube_env }}"
+      changed_when: false
+      register: openclaw_pvc_phase
+      when: openclaw_enabled | bool
+
+    - name: Assert OpenClaw PVC is bound
+      ansible.builtin.assert:
+        that:
+          - openclaw_pvc_phase.stdout == 'Bound'
+        fail_msg: OpenClaw PVC is not bound
+      when: openclaw_enabled | bool
+
+    - name: Wait for OpenClaw certificate readiness
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl -n {{ openclaw_namespace }} wait
+        --for=condition=Ready
+        certificate/openclaw-tls
+        --timeout=900s
+      environment: "{{ kube_env }}"
+      changed_when: false
+      when: openclaw_enabled | bool
+
+    - name: Read OpenClaw ingress host
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl -n {{ openclaw_namespace }} get ingress openclaw
+        -o jsonpath={.spec.rules[0].host}
+      environment: "{{ kube_env }}"
+      changed_when: false
+      register: openclaw_ingress_host
+      when: openclaw_enabled | bool
+
+    - name: Assert OpenClaw ingress host
+      ansible.builtin.assert:
+        that:
+          - openclaw_ingress_host.stdout == openclaw_host
+        fail_msg: OpenClaw ingress host does not match the configured hostname
+      when: openclaw_enabled | bool
+
+    - name: Assert OpenClaw gateway secret exists
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl -n {{ openclaw_namespace }} get secret openclaw-secrets -o name
+      environment: "{{ kube_env }}"
+      changed_when: false
+      register: openclaw_secret_check
+      when: openclaw_enabled | bool
+
+    - name: Assert OpenClaw gateway secret name
+      ansible.builtin.assert:
+        that:
+          - openclaw_secret_check.stdout == 'secret/openclaw-secrets'
+        fail_msg: OpenClaw gateway secret is missing
+      when: openclaw_enabled | bool
+
+    - name: Assert OpenClaw TLS secret exists
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl -n {{ openclaw_namespace }} get secret openclaw-tls -o name
+      environment: "{{ kube_env }}"
+      changed_when: false
+      register: openclaw_tls_secret_check
+      when: openclaw_enabled | bool
+
+    - name: Assert OpenClaw TLS secret name
+      ansible.builtin.assert:
+        that:
+          - openclaw_tls_secret_check.stdout == 'secret/openclaw-tls'
+        fail_msg: OpenClaw TLS secret is missing
+      when: openclaw_enabled | bool
+
+    - name: Check OpenClaw local health endpoint
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl -n {{ openclaw_namespace }} run openclaw-healthcheck
+        --rm
+        -i
+        --restart=Never
+        --image=curlimages/curl:8.12.1
+        --command --
+        sh -lc "curl -fsS http://openclaw.{{ openclaw_namespace }}.svc.cluster.local:{{ openclaw_gateway_port }}/healthz >/dev/null"
+      environment: "{{ kube_env }}"
+      changed_when: false
+      when: openclaw_enabled | bool
+
+    - name: Check OpenClaw service readiness endpoint
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl -n {{ openclaw_namespace }} run openclaw-readycheck
+        --rm
+        -i
+        --restart=Never
+        --image=curlimages/curl:8.12.1
+        --command --
+        sh -lc "curl -fsS http://openclaw.{{ openclaw_namespace }}.svc.cluster.local:{{ openclaw_gateway_port }}/readyz >/dev/null"
+      environment: "{{ kube_env }}"
+      changed_when: false
+      when: openclaw_enabled | bool
+
+    - name: Check OpenClaw public HTTPS endpoint
+      ansible.builtin.uri:
+        url: "https://{{ openclaw_host }}/"
+        method: GET
+        status_code: 200
+        return_content: false
+      changed_when: false
+      when: openclaw_enabled | bool
+
+    - name: Assert OpenClaw openai provider plugin is loaded
+      ansible.builtin.shell: >-
+        /usr/local/bin/kubectl -n {{ openclaw_namespace }} exec deployment/openclaw --
+        sh -lc "openclaw plugins list | grep -E '(^|[[:space:]])openai([[:space:]]|$)'"
+      environment: "{{ kube_env }}"
+      changed_when: false
+      when: openclaw_enabled | bool
+
+    - name: Assert OpenClaw WhatsApp config is seeded
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - -n
+          - "{{ openclaw_namespace }}"
+          - exec
+          - deployment/openclaw
+          - --
+          - node
+          - -e
+          - |
+            const fs = require("fs");
+            const cfg = JSON.parse(
+              fs.readFileSync("/home/node/.openclaw/openclaw.json", "utf8")
+            );
+            const accountId = {{ openclaw_whatsapp_account_id | to_json }};
+            if ((cfg.web?.enabled ?? false) !== {{ openclaw_web_enabled | to_json }}) process.exit(1);
+            if (!cfg.channels?.whatsapp) process.exit(2);
+            if (cfg.channels.whatsapp.dmPolicy !== {{ openclaw_whatsapp_dm_policy | to_json }}) process.exit(3);
+            if (cfg.channels.whatsapp.groupPolicy !== {{ openclaw_whatsapp_group_policy | to_json }}) process.exit(4);
+            if (!cfg.channels.whatsapp.accounts || typeof cfg.channels.whatsapp.accounts[accountId] !== "object") process.exit(5);
+            console.log("ok");
+      environment: "{{ kube_env }}"
+      changed_when: false
+      when:
+        - openclaw_enabled | bool
+        - openclaw_whatsapp_enabled | bool
+
+    - name: Read OpenClaw channel status
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - -n
+          - "{{ openclaw_namespace }}"
+          - exec
+          - deployment/openclaw
+          - --
+          - openclaw
+          - gateway
+          - call
+          - channels.status
+          - --params
+          - '{"probe":true,"timeoutMs":5000}'
+      environment: "{{ kube_env }}"
+      changed_when: false
+      register: openclaw_channel_status
+      when:
+        - openclaw_enabled | bool
+        - openclaw_whatsapp_enabled | bool
+
+    - name: Assert OpenClaw WhatsApp channel is visible to the gateway
+      ansible.builtin.assert:
+        that:
+          - '"whatsapp" in openclaw_channel_status.stdout'
+        fail_msg: OpenClaw gateway status did not report the WhatsApp channel
+      when:
+        - openclaw_enabled | bool
+        - openclaw_whatsapp_enabled | bool
+
+    - name: Assert OpenClaw ZAI provider plugin is loaded when configured
+      ansible.builtin.shell: >-
+        /usr/local/bin/kubectl -n {{ openclaw_namespace }} exec deployment/openclaw --
+        sh -lc "openclaw plugins list | grep -E '(^|[[:space:]])zai([[:space:]]|$)'"
+      environment: "{{ kube_env }}"
+      changed_when: false
+      when:
+        - openclaw_enabled | bool
+        - vault_openclaw_zai_api_key is defined
+        - vault_openclaw_zai_api_key | length > 0
+        - vault_openclaw_zai_api_key != 'CHANGE_ME'
+
+    - name: Create validation namespace if needed
+      ansible.builtin.shell: >-
+        /usr/local/bin/kubectl get namespace {{ validation_namespace }} >/dev/null 2>&1
+        || /usr/local/bin/kubectl create namespace {{ validation_namespace }}
+      environment: "{{ kube_env }}"
+      changed_when: "'created' in validation_namespace_result.stdout"
+      register: validation_namespace_result
+      when:
+        - cert_manager_enabled | bool
+        - acme_dns_provider == 'cloudflare'
+        - validation_run_tls_smoke | bool
+
+    - name: Render DNS-01 smoke certificate manifest
+      ansible.builtin.template:
+        src: ../templates/dns01-smoke-certificate.yaml.j2
+        dest: /tmp/dns01-smoke-certificate.yaml
+        mode: "0600"
+      when:
+        - cert_manager_enabled | bool
+        - acme_dns_provider == 'cloudflare'
+        - validation_run_tls_smoke | bool
+
+    - name: Validate Cloudflare-backed certificate issuance
+      when:
+        - cert_manager_enabled | bool
+        - acme_dns_provider == 'cloudflare'
+        - validation_run_tls_smoke | bool
+      block:
+        - name: Apply DNS-01 smoke certificate
+          ansible.builtin.command: /usr/local/bin/kubectl apply -f /tmp/dns01-smoke-certificate.yaml
+          environment: "{{ kube_env }}"
+          changed_when: false
+
+        - name: Wait for DNS-01 smoke certificate
+          ansible.builtin.command: >-
+            /usr/local/bin/kubectl -n {{ validation_namespace }} wait
+            --for=condition=Ready
+            certificate/{{ validation_certificate_name }}
+            --timeout=900s
+          environment: "{{ kube_env }}"
+          changed_when: false
+
+        - name: Assert smoke certificate secret exists
+          ansible.builtin.command: >-
+            /usr/local/bin/kubectl -n {{ validation_namespace }} get secret
+            {{ validation_certificate_name }}-tls
+            -o name
+          environment: "{{ kube_env }}"
+          changed_when: false
+      always:
+        - name: Clean up validation namespace
+          ansible.builtin.command: >-
+            /usr/local/bin/kubectl delete namespace {{ validation_namespace }}
+            --ignore-not-found=true
+            --wait=true
+          environment: "{{ kube_env }}"
+          changed_when: false

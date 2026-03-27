@@ -1,0 +1,50 @@
+---
+- name: Assert Cloudflare API token is configured
+  ansible.builtin.assert:
+    that:
+      - vault_cloudflare_api_token is defined
+      - vault_cloudflare_api_token | length > 0
+      - vault_cloudflare_api_token != 'CHANGE_ME'
+    fail_msg: >-
+      Cloudflare DNS-01 provisioning requires vault_cloudflare_api_token in
+      inventories/personal/group_vars/all/vault.yml encrypted with ansible-vault.
+
+- name: Render Cloudflare API token secret manifest
+  ansible.builtin.template:
+    src: cloudflare-api-token-secret.yaml.j2
+    dest: /tmp/cloudflare-api-token-secret.yaml
+    mode: "0600"
+
+- name: Render ClusterIssuer manifest
+  ansible.builtin.template:
+    src: clusterissuers.yaml.j2
+    dest: /tmp/clusterissuers.yaml
+    mode: "0600"
+
+- name: Apply Cloudflare API token secret
+  ansible.builtin.command: /usr/local/bin/kubectl apply -f /tmp/cloudflare-api-token-secret.yaml
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+    K3S_CONFIG_FILE: /dev/null
+  changed_when: false
+
+- name: Apply Let us Encrypt ClusterIssuers
+  ansible.builtin.command: /usr/local/bin/kubectl apply -f /tmp/clusterissuers.yaml
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+    K3S_CONFIG_FILE: /dev/null
+  changed_when: false
+
+- name: Wait for ClusterIssuers to be ready
+  ansible.builtin.command: >-
+    /usr/local/bin/kubectl wait
+    --for=condition=Ready
+    clusterissuer/{{ item }}
+    --timeout=300s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+    K3S_CONFIG_FILE: /dev/null
+  changed_when: false
+  loop:
+    - letsencrypt-staging
+    - letsencrypt-prod

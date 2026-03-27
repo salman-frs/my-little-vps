@@ -1,0 +1,149 @@
+---
+- name: Create K3s config directory
+  ansible.builtin.file:
+    path: "{{ k3s_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Render K3s server config
+  ansible.builtin.template:
+    src: k3s-config.yaml.j2
+    dest: "{{ k3s_config_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart K3s
+
+- name: Open K3s firewall ports
+  ansible.posix.firewalld:
+    port: "{{ item }}/tcp"
+    state: enabled
+    permanent: true
+    immediate: true
+  loop:
+    - "80"
+    - "443"
+    - "6443"
+
+- name: Trust pod and service CIDRs
+  ansible.posix.firewalld:
+    zone: trusted
+    source: "{{ item }}"
+    state: enabled
+    permanent: true
+    immediate: true
+  loop:
+    - "{{ pod_cidr }}"
+    - "{{ service_cidr }}"
+
+- name: Ensure local source directory exists
+  ansible.builtin.file:
+    path: /usr/local/src
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download K3s installer
+  ansible.builtin.get_url:
+    url: "{{ k3s_install_script_url }}"
+    dest: /usr/local/src/k3s-install.sh
+    mode: "0755"
+
+- name: Check installed K3s binary
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s
+  register: k3s_server_binary
+
+- name: Read installed K3s version
+  ansible.builtin.command: /usr/local/bin/k3s --version
+  when: k3s_server_binary.stat.exists
+  changed_when: false
+  failed_when: false
+  register: k3s_server_version_check
+
+- name: Extract installed K3s version
+  ansible.builtin.set_fact:
+    k3s_server_installed_version: >-
+      {{ k3s_server_version_check.stdout | regex_search('v[^\\s]+') | default('') }}
+
+- name: Install or upgrade K3s server
+  ansible.builtin.command: /usr/local/src/k3s-install.sh
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+    INSTALL_K3S_EXEC: server
+  when: not k3s_server_binary.stat.exists or k3s_server_installed_version != k3s_version
+  changed_when: true
+
+- name: Ensure k3s service is enabled and started
+  ansible.builtin.systemd:
+    name: k3s
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Flush handlers before health checks
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for kubeconfig to be written
+  ansible.builtin.wait_for:
+    path: "{{ k3s_kubeconfig_path }}"
+    timeout: 120
+
+- name: Wait for K3s API readiness
+  ansible.builtin.command: /usr/local/bin/kubectl get --raw=/readyz
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+    K3S_CONFIG_FILE: /dev/null
+  register: k3s_server_readyz
+  retries: 60
+  delay: 5
+  until: k3s_server_readyz.rc == 0
+  changed_when: false
+
+- name: Wait for the node to be Ready
+  ansible.builtin.command: >-
+    /usr/local/bin/kubectl wait
+    --for=condition=Ready
+    node/{{ k3s_node_name }}
+    --timeout=300s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+    K3S_CONFIG_FILE: /dev/null
+  changed_when: false
+
+- name: Read passwd entry for admin user
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ admin_user }}"
+
+- name: Capture admin home directory
+  ansible.builtin.set_fact:
+    k3s_server_admin_home: "{{ ansible_facts.getent_passwd[admin_user][4] }}"
+
+- name: Read root kubeconfig
+  ansible.builtin.slurp:
+    path: "{{ k3s_kubeconfig_path }}"
+  register: k3s_server_root_kubeconfig
+
+- name: Ensure admin kubeconfig directory exists
+  ansible.builtin.file:
+    path: "{{ k3s_server_admin_home }}/.kube"
+    state: directory
+    owner: "{{ admin_user }}"
+    group: "{{ admin_user }}"
+    mode: "0700"
+
+- name: Write admin kubeconfig with public API endpoint
+  ansible.builtin.copy:
+    dest: "{{ k3s_server_admin_home }}/.kube/config"
+    owner: "{{ admin_user }}"
+    group: "{{ admin_user }}"
+    mode: "0600"
+    content: >-
+      {{
+        (k3s_server_root_kubeconfig.content | b64decode)
+        | replace('https://127.0.0.1:6443', 'https://' ~ k3s_api_host ~ ':6443')
+      }}

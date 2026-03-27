@@ -1,0 +1,86 @@
+---
+admin_user: admin
+ssh_port: 22
+
+public_ip: REPLACE_ME_PUBLIC_IP
+primary_domain: REPLACE_ME_DOMAIN
+k3s_node_name: REPLACE_ME_NODE_NAME
+k3s_api_host: "{{ public_ip }}"
+
+k3s_version: v1.34.5+k3s1
+k3s_install_script_url: https://get.k3s.io
+k3s_config_dir: /etc/rancher/k3s
+k3s_config_file: "{{ k3s_config_dir }}/config.yaml"
+k3s_kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+k3s_snapshot_schedule: "0 */6 * * *"
+k3s_snapshot_retention: 14
+k3s_tls_sans:
+  - "{{ public_ip }}"
+  - "{{ primary_domain }}"
+
+pod_cidr: 10.42.0.0/16
+service_cidr: 10.43.0.0/16
+
+helm_version: v3.20.1
+cert_manager_enabled: true
+cert_manager_namespace: cert-manager
+cert_manager_version: v1.20.0
+letsencrypt_email: REPLACE_ME_EMAIL
+acme_dns_provider: none
+cloudflare_api_token_secret_name: cloudflare-api-token
+cloudflare_api_token_secret_key: api-token
+
+validation_namespace: k3s-validation
+validation_certificate_name: dns01-smoke
+validation_smoke_fqdn: REPLACE_ME_SMOKE_FQDN
+validation_run_tls_smoke: false
+
+openclaw_enabled: true
+openclaw_namespace: openclaw
+openclaw_image: ghcr.io/openclaw/openclaw@sha256:b16b9c0a8b56058258ed34b9da4c390291885b1d41b89c1e7f8ffd098318bf81
+openclaw_host: "openclaw.{{ primary_domain }}"
+openclaw_storage_size: 10Gi
+openclaw_gateway_bind: lan
+openclaw_gateway_port: 18789
+openclaw_gateway_trusted_proxies: []
+openclaw_gateway_allow_real_ip_fallback: false
+openclaw_model_primary: openai-codex/gpt-5.4
+openclaw_clusterissuer: letsencrypt-prod
+openclaw_web_enabled: false
+openclaw_web_heartbeat_seconds: 60
+openclaw_whatsapp_enabled: false
+openclaw_whatsapp_account_id: default
+openclaw_whatsapp_dm_policy: pairing
+openclaw_whatsapp_allow_from: []
+openclaw_whatsapp_group_policy: disabled
+
+base_packages:
+  - bash-completion
+  - bind-utils
+  - ca-certificates
+  - chrony
+  - container-selinux
+  - curl
+  - firewalld
+  - git
+  - gzip
+  - iproute
+  - iptables
+  - jq
+  - openssl
+  - policycoreutils-python-utils
+  - selinux-policy-base
+  - tar
+
+k3s_cleanup_paths:
+  - /etc/rancher/k3s
+  - /var/lib/rancher/k3s
+  - /var/lib/cni
+  - /etc/systemd/system/k3s.service
+  - /etc/systemd/system/k3s.service.env
+  - /usr/local/bin/k3s
+  - /usr/local/bin/kubectl
+  - /usr/local/bin/crictl
+  - /usr/local/bin/ctr
+  - /usr/local/bin/k3s-killall.sh
+  - /usr/local/bin/k3s-uninstall.sh

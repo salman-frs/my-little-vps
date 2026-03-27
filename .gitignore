@@ -1,0 +1,20 @@
+# Local caches and virtualenvs
+.ansible/
+.ansible-lint-cache/
+.pytest_cache/
+.venv/
+ansible/.ansible/
+ansible/.ansible-lint-cache/
+.DS_Store
+
+# Local secrets and live inventories never belong in the public repo
+ansible/.vault_pass
+ansible/inventories/personal/
+
+# Local archives and release artifacts
+*.tgz
+*.tar.gz
+*.tar
+
+# Ansible retry files
+*.retry

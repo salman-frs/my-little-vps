@@ -1,0 +1,51 @@
+---
+- name: Stop and disable k3s if present
+  ansible.builtin.systemd:
+    name: k3s
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Check for k3s uninstall script
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s-uninstall.sh
+  register: reset_k3s_uninstall_script
+
+- name: Run k3s uninstall script
+  ansible.builtin.command: /usr/local/bin/k3s-uninstall.sh
+  when: reset_k3s_uninstall_script.stat.exists
+  changed_when: true
+
+- name: Remove previous k3s files and data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ k3s_cleanup_paths }}"
+
+- name: Remove K3s firewall ports
+  ansible.posix.firewalld:
+    port: "{{ item }}/tcp"
+    state: disabled
+    permanent: true
+    immediate: true
+  loop:
+    - "80"
+    - "443"
+    - "6443"
+  failed_when: false
+
+- name: Remove trusted pod and service CIDRs
+  ansible.posix.firewalld:
+    zone: trusted
+    source: "{{ item }}"
+    state: disabled
+    permanent: true
+    immediate: true
+  loop:
+    - "{{ pod_cidr }}"
+    - "{{ service_cidr }}"
+  failed_when: false
+
+- name: Reload systemd after cleanup
+  ansible.builtin.systemd:
+    daemon_reload: true

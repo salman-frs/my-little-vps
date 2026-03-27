@@ -1,0 +1,416 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ openclaw_namespace }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openclaw-secrets
+  namespace: {{ openclaw_namespace }}
+type: Opaque
+stringData:
+  OPENCLAW_GATEWAY_TOKEN: {{ vault_openclaw_gateway_token | quote }}
+{% if vault_openclaw_zai_api_key is defined and vault_openclaw_zai_api_key | length > 0 and vault_openclaw_zai_api_key != 'CHANGE_ME' %}
+  ZAI_API_KEY: {{ vault_openclaw_zai_api_key | quote }}
+{% endif %}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openclaw-config
+  namespace: {{ openclaw_namespace }}
+data:
+  openclaw.json: |
+    {
+      "gateway": {
+        "mode": "local",
+        "bind": {{ openclaw_gateway_bind | to_json }},
+        "port": {{ openclaw_gateway_port }},
+{% if openclaw_gateway_trusted_proxies is defined and openclaw_gateway_trusted_proxies | length > 0 %}
+        "trustedProxies": {{ openclaw_gateway_trusted_proxies | to_json }},
+{% endif %}
+{% if openclaw_gateway_allow_real_ip_fallback | bool %}
+        "allowRealIpFallback": true,
+{% endif %}
+        "auth": {
+          "mode": "token"
+        },
+        "controlUi": {
+          "enabled": true,
+          "allowedOrigins": [
+            {{ ('https://' ~ openclaw_host) | to_json }}
+          ]
+        }
+      },
+{% if openclaw_web_enabled | bool %}
+      "web": {
+        "enabled": {{ openclaw_web_enabled | to_json }},
+        "heartbeatSeconds": {{ openclaw_web_heartbeat_seconds }},
+        "reconnect": {
+          "initialMs": 2000,
+          "maxMs": 120000,
+          "factor": 1.4,
+          "jitter": 0.2,
+          "maxAttempts": 0
+        }
+      },
+{% endif %}
+      "agents": {
+        "defaults": {
+          "workspace": "~/.openclaw/workspace",
+          "model": {
+            "primary": {{ openclaw_model_primary | to_json }}
+          }
+        },
+        "list": [
+          {
+            "id": "default",
+            "name": "OpenClaw Assistant",
+            "workspace": "~/.openclaw/workspace"
+          }
+        ]
+      },
+{% if openclaw_whatsapp_enabled | bool %}
+      "channels": {
+        "whatsapp": {
+          "dmPolicy": {{ openclaw_whatsapp_dm_policy | to_json }},
+          "allowFrom": {{ openclaw_whatsapp_allow_from | to_json }},
+          "groupPolicy": {{ openclaw_whatsapp_group_policy | to_json }},
+          "accounts": {
+            {{ openclaw_whatsapp_account_id | to_json }}: {}
+          }
+        }
+      },
+{% endif %}
+      "cron": {
+        "enabled": false
+      }
+    }
+  AGENTS.md: |
+    # OpenClaw Assistant
+
+    You are a helpful AI assistant running in Kubernetes.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openclaw-home-pvc
+  namespace: {{ openclaw_namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ openclaw_storage_size }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openclaw
+  namespace: {{ openclaw_namespace }}
+  labels:
+    app: openclaw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openclaw
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: openclaw
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: init-config
+          image: {{ openclaw_image | quote }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - node
+            - -e
+            - |
+              const fs = require('fs');
+              const path = require('path');
+
+              const configDir = '/home/node/.openclaw';
+              const configPath = path.join(configDir, 'openclaw.json');
+              const seedPath = '/config/openclaw.json';
+              const workspaceDir = path.join(configDir, 'workspace');
+              const agentsSeedPath = '/config/AGENTS.md';
+              const agentsPath = path.join(workspaceDir, 'AGENTS.md');
+              const webEnabled = {{ openclaw_web_enabled | to_json }};
+              const whatsappEnabled = {{ openclaw_whatsapp_enabled | to_json }};
+
+              fs.rmSync(path.join(configDir, 'extensions', 'openai'), { recursive: true, force: true });
+              fs.rmSync(path.join(configDir, 'node_modules'), { recursive: true, force: true });
+              fs.mkdirSync(workspaceDir, { recursive: true });
+
+              const seedConfig = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
+              let mergedConfig = seedConfig;
+
+              if (fs.existsSync(configPath)) {
+                try {
+                  const existingConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+                  mergedConfig = {
+                    ...existingConfig,
+                    ...seedConfig,
+                    gateway: {
+                      ...(existingConfig.gateway || {}),
+                      ...(seedConfig.gateway || {}),
+                    },
+                    ...(seedConfig.web || existingConfig.web ? {
+                      web: {
+                        ...(existingConfig.web || {}),
+                        ...(seedConfig.web || {}),
+                        reconnect: {
+                          ...((existingConfig.web || {}).reconnect || {}),
+                          ...((seedConfig.web || {}).reconnect || {}),
+                        },
+                      },
+                    } : {}),
+                    agents: {
+                      ...(existingConfig.agents || {}),
+                      ...(seedConfig.agents || {}),
+                      defaults: {
+                        ...((existingConfig.agents || {}).defaults || {}),
+                        ...((seedConfig.agents || {}).defaults || {}),
+                        model: {
+                          ...((((existingConfig.agents || {}).defaults || {}).model) || {}),
+                          ...((((seedConfig.agents || {}).defaults || {}).model) || {}),
+                        },
+                        models: {
+                          ...((((existingConfig.agents || {}).defaults || {}).models) || {}),
+                          ...((((seedConfig.agents || {}).defaults || {}).models) || {}),
+                        },
+                      },
+                      list: Array.isArray((seedConfig.agents || {}).list) && seedConfig.agents.list.length > 0
+                        ? seedConfig.agents.list
+                        : ((existingConfig.agents || {}).list || []),
+                    },
+                    bindings: Array.isArray(seedConfig.bindings)
+                      ? seedConfig.bindings
+                      : (Array.isArray(existingConfig.bindings) ? existingConfig.bindings : []),
+                    ...(seedConfig.channels || existingConfig.channels ? {
+                      channels: {
+                        ...(existingConfig.channels || {}),
+                        ...(seedConfig.channels || {}),
+                        ...((existingConfig.channels || {}).whatsapp || (seedConfig.channels || {}).whatsapp ? {
+                          whatsapp: {
+                            ...(((existingConfig.channels || {}).whatsapp) || {}),
+                            ...(((seedConfig.channels || {}).whatsapp) || {}),
+                            accounts: {
+                              ...((((existingConfig.channels || {}).whatsapp || {}).accounts) || {}),
+                              ...((((seedConfig.channels || {}).whatsapp || {}).accounts) || {}),
+                            },
+                          },
+                        } : {}),
+                      },
+                    } : {}),
+                    cron: {
+                      ...(existingConfig.cron || {}),
+                      ...(seedConfig.cron || {}),
+                    },
+                    auth: {
+                      ...(seedConfig.auth || {}),
+                      ...(existingConfig.auth || {}),
+                      profiles: {
+                        ...((seedConfig.auth || {}).profiles || {}),
+                        ...((existingConfig.auth || {}).profiles || {}),
+                      },
+                    },
+                    commands: existingConfig.commands || seedConfig.commands,
+                    meta: existingConfig.meta || seedConfig.meta,
+                  };
+
+                  if (!webEnabled) {
+                    delete mergedConfig.web;
+                  }
+
+                  if (!whatsappEnabled) {
+                    if (mergedConfig.channels) {
+                      delete mergedConfig.channels.whatsapp;
+                      if (Object.keys(mergedConfig.channels).length === 0) {
+                        delete mergedConfig.channels;
+                      }
+                    }
+                    if (Array.isArray(mergedConfig.bindings)) {
+                      mergedConfig.bindings = mergedConfig.bindings.filter((binding) => binding?.match?.channel !== 'whatsapp');
+                      if (mergedConfig.bindings.length === 0) {
+                        delete mergedConfig.bindings;
+                      }
+                    }
+                  }
+                } catch (error) {
+                  console.error(`failed to merge existing openclaw.json: ${error.message}`);
+                }
+              }
+
+              fs.writeFileSync(configPath, `${JSON.stringify(mergedConfig, null, 2)}\n`);
+              fs.copyFileSync(agentsSeedPath, agentsPath);
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 50m
+            limits:
+              memory: 64Mi
+              cpu: 100m
+          volumeMounts:
+            - name: openclaw-home
+              mountPath: /home/node/.openclaw
+            - name: config
+              mountPath: /config
+      containers:
+        - name: gateway
+          image: {{ openclaw_image | quote }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - node
+            - /app/dist/index.js
+            - gateway
+            - run
+          ports:
+            - name: gateway
+              containerPort: {{ openclaw_gateway_port }}
+              protocol: TCP
+          env:
+            - name: HOME
+              value: /home/node
+            - name: OPENCLAW_CONFIG_DIR
+              value: /home/node/.openclaw
+            - name: NODE_ENV
+              value: production
+            - name: OPENCLAW_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: OPENCLAW_GATEWAY_TOKEN
+{% if vault_openclaw_zai_api_key is defined and vault_openclaw_zai_api_key | length > 0 and vault_openclaw_zai_api_key != 'CHANGE_ME' %}
+            - name: ZAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: ZAI_API_KEY
+{% endif %}
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 2Gi
+              cpu: "1"
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: gateway
+              scheme: HTTP
+              httpHeaders:
+                - name: Host
+                  value: {{ openclaw_host | quote }}
+                - name: X-Forwarded-Proto
+                  value: "https"
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: gateway
+              scheme: HTTP
+              httpHeaders:
+                - name: Host
+                  value: {{ openclaw_host | quote }}
+                - name: X-Forwarded-Proto
+                  value: "https"
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: gateway
+              scheme: HTTP
+              httpHeaders:
+                - name: Host
+                  value: {{ openclaw_host | quote }}
+                - name: X-Forwarded-Proto
+                  value: "https"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: openclaw-home
+              mountPath: /home/node/.openclaw
+            - name: tmp-volume
+              mountPath: /tmp
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: openclaw-home
+          persistentVolumeClaim:
+            claimName: openclaw-home-pvc
+        - name: config
+          configMap:
+            name: openclaw-config
+        - name: tmp-volume
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openclaw
+  namespace: {{ openclaw_namespace }}
+  labels:
+    app: openclaw
+spec:
+  type: ClusterIP
+  selector:
+    app: openclaw
+  ports:
+    - name: gateway
+      port: {{ openclaw_gateway_port }}
+      targetPort: {{ openclaw_gateway_port }}
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: openclaw
+  namespace: {{ openclaw_namespace }}
+  annotations:
+    cert-manager.io/cluster-issuer: {{ openclaw_clusterissuer | quote }}
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - {{ openclaw_host }}
+      secretName: openclaw-tls
+  rules:
+    - host: {{ openclaw_host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: openclaw
+                port:
+                  number: {{ openclaw_gateway_port }}

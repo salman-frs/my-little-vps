@@ -1,0 +1,5 @@
+exclude_paths:
+  - .ansible/
+  - inventories/personal/
+  - .venv/
+profile: basic

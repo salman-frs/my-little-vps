@@ -1,0 +1,13 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ validation_certificate_name }}
+  namespace: {{ validation_namespace }}
+spec:
+  secretName: {{ validation_certificate_name }}-tls
+  commonName: {{ validation_smoke_fqdn }}
+  dnsNames:
+    - {{ validation_smoke_fqdn }}
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-staging

@@ -1,0 +1,17 @@
+---
+- name: Provision single-node K3s VPS host
+  hosts: k3s_servers
+  become: true
+  gather_facts: true
+
+  roles:
+    - role: common
+    - role: k3s_server
+    - role: cert_manager
+      when: cert_manager_enabled | bool
+    - role: cloudflare_dns01
+      when:
+        - cert_manager_enabled | bool
+        - acme_dns_provider == 'cloudflare'
+    - role: openclaw
+      when: openclaw_enabled | bool

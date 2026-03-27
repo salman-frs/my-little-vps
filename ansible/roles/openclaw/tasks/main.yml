@@ -1,0 +1,46 @@
+---
+- name: Assert OpenClaw gateway token is configured
+  ansible.builtin.assert:
+    that:
+      - vault_openclaw_gateway_token is defined
+      - vault_openclaw_gateway_token | length > 0
+      - vault_openclaw_gateway_token != 'CHANGE_ME'
+    fail_msg: >-
+      OpenClaw provisioning requires vault_openclaw_gateway_token in
+      inventories/personal/group_vars/all/vault.yml encrypted with ansible-vault.
+
+- name: Render OpenClaw manifest bundle
+  ansible.builtin.template:
+    src: openclaw-manifests.yaml.j2
+    dest: /tmp/openclaw-manifests.yaml
+    mode: "0600"
+
+- name: Apply OpenClaw manifest bundle
+  ansible.builtin.command: /usr/local/bin/kubectl apply -f /tmp/openclaw-manifests.yaml
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+    K3S_CONFIG_FILE: /dev/null
+  register: openclaw_apply_result
+  changed_when: >-
+    'configured' in openclaw_apply_result.stdout
+    or 'created' in openclaw_apply_result.stdout
+
+- name: Restart OpenClaw deployment when config changes
+  ansible.builtin.command: >-
+    /usr/local/bin/kubectl -n {{ openclaw_namespace }} rollout restart
+    deployment/openclaw
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+    K3S_CONFIG_FILE: /dev/null
+  changed_when: true
+  when: openclaw_apply_result is changed
+
+- name: Wait for OpenClaw deployment rollout
+  ansible.builtin.command: >-
+    /usr/local/bin/kubectl -n {{ openclaw_namespace }} rollout status
+    deployment/openclaw
+    --timeout=900s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+    K3S_CONFIG_FILE: /dev/null
+  changed_when: false
