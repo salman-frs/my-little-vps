@@ -15,7 +15,8 @@ host provisioning, cluster installation, ingress through Traefik, optional
 certificate management with cert-manager and Cloudflare DNS-01, and validation
 playbooks for checking the resulting system. Cloudflare Access configuration
 for public-facing applications can live in the Terraform workspace under
-`terraform/`.
+`terraform/`, while private admin access can move onto Tailscale instead of
+leaving SSH and the Kubernetes API open to the internet.
 
 Operational details live under [`ansible/`](./ansible/). The root README is the
 front door for the repository; the operator guide contains the working

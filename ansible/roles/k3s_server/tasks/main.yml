@@ -1,4 +1,50 @@
 ---
+- name: Set effective K3s API endpoint and TLS SANs
+  ansible.builtin.set_fact:
+    k3s_server_effective_api_host: >-
+      {{
+        tailscale_k3s_api_host
+        if (
+          tailscale_enabled | default(false) | bool
+          and tailscale_private_k3s_api_effective | default(false) | bool
+          and (tailscale_k3s_api_host | default('') | length > 0)
+        )
+        else (
+          tailscale_ipv4
+          if (
+            tailscale_enabled | default(false) | bool
+            and tailscale_private_k3s_api_effective | default(false) | bool
+            and (tailscale_ipv4 | default('') | length > 0)
+          )
+          else k3s_api_host
+        )
+      }}
+    k3s_server_effective_tls_sans: >-
+      {{
+        (
+          k3s_tls_sans
+          + (
+            [tailscale_k3s_api_host]
+            if (
+              tailscale_enabled | default(false) | bool
+              and tailscale_private_k3s_api_effective | default(false) | bool
+              and (tailscale_k3s_api_host | default('') | length > 0)
+            )
+            else []
+          )
+          + (
+            [tailscale_ipv4]
+            if (
+              tailscale_enabled | default(false) | bool
+              and tailscale_private_k3s_api_effective | default(false) | bool
+              and (tailscale_k3s_api_host | default('') | length == 0)
+              and (tailscale_ipv4 | default('') | length > 0)
+            )
+            else []
+          )
+        ) | unique
+      }}
+
 - name: Create K3s config directory
   ansible.builtin.file:
     path: "{{ k3s_config_dir }}"
@@ -84,6 +130,7 @@
     immediate: true
   loop:
     - "6443"
+  when: not tailscale_private_k3s_api_effective | default(false) | bool
 
 - name: Open public HTTP and HTTPS firewall ports when origin lockdown is disabled
   ansible.posix.firewalld:
@@ -214,7 +261,7 @@
     group: "{{ admin_user }}"
     mode: "0700"
 
-- name: Write admin kubeconfig with public API endpoint
+- name: Write admin kubeconfig with effective API endpoint
   ansible.builtin.copy:
     dest: "{{ k3s_server_admin_home }}/.kube/config"
     owner: "{{ admin_user }}"
@@ -223,5 +270,5 @@
     content: >-
       {{
         (k3s_server_root_kubeconfig.content | b64decode)
-        | replace('https://127.0.0.1:6443', 'https://' ~ k3s_api_host ~ ':6443')
+        | replace('https://127.0.0.1:6443', 'https://' ~ k3s_server_effective_api_host ~ ':6443')
       }}

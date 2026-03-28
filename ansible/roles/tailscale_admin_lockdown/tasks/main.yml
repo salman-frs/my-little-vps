@@ -1,0 +1,27 @@
+---
+- name: Assert Tailscale private admin mode is paired with Tailscale
+  ansible.builtin.assert:
+    that:
+      - tailscale_enabled | default(false) | bool
+      - tailscale_private_ssh_effective | default(false) | bool or tailscale_private_k3s_api_effective | default(false) | bool
+    fail_msg: Private Tailscale admin access requires tailscale_enabled to be true
+
+- name: Trust the Tailscale interface
+  ansible.posix.firewalld:
+    zone: trusted
+    interface: tailscale0
+    state: enabled
+    permanent: true
+    immediate: true
+
+- name: Remove public SSH and K3s API ports
+  ansible.posix.firewalld:
+    port: "{{ item }}/tcp"
+    state: disabled
+    permanent: true
+    immediate: true
+  loop: >-
+    {{
+      ([] + ([ssh_port | string] if tailscale_private_ssh_effective | default(false) | bool else []))
+      + (['6443'] if tailscale_private_k3s_api_effective | default(false) | bool else [])
+    }}

@@ -115,11 +115,21 @@ What they do:
 
 ## Feature flags
 
+- `ssh_hardening_enabled`: manage an `sshd_config.d` hardening drop-in
+- `ssh_allowed_users`: limit SSH logins to the named local accounts
+- `ssh_password_auth_enabled`: keep password login on or off
+- `ssh_root_login`: set the `PermitRootLogin` mode
+- `ssh_max_auth_tries`, `ssh_max_sessions`, `ssh_max_startups`: tighten SSH daemon thresholds
+- `fail2ban_enabled`: install and run fail2ban for the sshd jail
 - `cert_manager_enabled`: install cert-manager when `true`
 - `acme_dns_provider`: set to `cloudflare` to enable Cloudflare-backed DNS-01 issuers
 - `cloudflare_access_enabled`: expect the public hostname to be protected by Cloudflare Access
 - `cloudflare_origin_lockdown_enabled`: allow `80/tcp` and `443/tcp` only from Cloudflare IP ranges
 - `cloudflare_ips_v4_url` and `cloudflare_ips_v6_url`: source URLs for Cloudflare origin allowlists
+- `tailscale_enabled`: install and join Tailscale on the VPS
+- `tailscale_private_ssh_enabled`: move SSH behind `tailscale0`
+- `tailscale_private_k3s_api_enabled`: move the K3s API behind `tailscale0`
+- `tailscale_k3s_api_host`: optional MagicDNS hostname to use in the admin kubeconfig instead of the node's Tailscale IP
 - `validation_run_tls_smoke`: issue a temporary ACME smoke certificate during validation when `true`
 - `openclaw_enabled`: deploy OpenClaw into the cluster when `true`
 
@@ -261,3 +271,70 @@ the second auth layer after Access login.
 The origin lockdown applies to the whole VPS web ingress, not just OpenClaw.
 Once enabled, direct origin-IP access to `80/tcp` and `443/tcp` should fail for
 non-Cloudflare clients.
+
+----
+
+## Private admin access with Tailscale
+
+Tailscale is optional, but it is the recommended way to remove public admin
+ports from a single-user VPS. When enabled, the VPS joins your tailnet, the
+admin kubeconfig points at the node's Tailscale address or MagicDNS hostname,
+and firewalld stops exposing `22/tcp` and `6443/tcp` on the public interface.
+
+Set these non-secret vars in `inventories/personal/group_vars/all/main.yml`:
+
+- `tailscale_enabled`
+- `tailscale_private_ssh_enabled`
+- `tailscale_private_k3s_api_enabled`
+- `tailscale_repo_url`
+- `tailscale_hostname`
+- `tailscale_accept_dns`
+- `tailscale_ssh_enabled`
+- `tailscale_tags`
+- `tailscale_k3s_api_host`
+
+Set this secret in `inventories/personal/group_vars/all/vault.yml`:
+
+- `vault_tailscale_auth_key`
+
+Recommended rollout order:
+
+1. join your local Mac to the same tailnet first
+2. create a reusable Tailscale auth key for the VPS
+3. set `tailscale_enabled: true`
+4. run `playbooks/provision.yml`
+5. verify `ssh admin@<tailscale-ip>` and `kubectl` both work over Tailscale
+6. set `tailscale_private_k3s_api_enabled: true`
+7. rerun `playbooks/provision.yml`
+8. rerun `playbooks/validate.yml`
+9. only if you are comfortable removing the public SSH escape hatch, set `tailscale_private_ssh_enabled: true`
+10. rerun `playbooks/provision.yml` and `playbooks/validate.yml`
+
+If you prefer MagicDNS in the admin kubeconfig, set `tailscale_k3s_api_host`
+explicitly. If you leave it empty, the kubeconfig will use the node's current
+Tailscale IPv4 address instead.
+
+For VPS hosts without a reliable console rescue path, keep `tailscale_private_ssh_enabled`
+off at first and move only `6443/tcp` behind Tailscale. That leaves a narrow
+public SSH break-glass path while `kubectl` is already private.
+
+----
+
+## SSH hardening
+
+This repo keeps a hardened public SSH path for break-glass access unless you
+explicitly move SSH behind Tailscale too. The default hardening model is:
+
+- key-based login only
+- root login disabled
+- login limited to `ssh_allowed_users`
+- lower auth and session thresholds than the stock distro defaults
+- fail2ban watching the `sshd` journal and banning offenders through firewalld
+
+Useful checks after changing SSH settings:
+
+```bash
+ssh admin@<public-ip> 'sudo sshd -T | egrep "^(permitrootlogin|passwordauthentication|authenticationmethods|allowusers|maxauthtries|maxsessions|maxstartups)"'
+ssh admin@<public-ip> 'sudo fail2ban-client status sshd'
+ssh admin@<tailscale-ip> 'hostname'
+```

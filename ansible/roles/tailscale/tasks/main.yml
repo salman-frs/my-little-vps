@@ -1,0 +1,116 @@
+---
+- name: Install Tailscale yum repository
+  ansible.builtin.get_url:
+    url: "{{ tailscale_repo_url }}"
+    dest: /etc/yum.repos.d/tailscale.repo
+    mode: "0644"
+
+- name: Install Tailscale package
+  ansible.builtin.package:
+    name: tailscale
+    state: present
+
+- name: Enable and start tailscaled
+  ansible.builtin.systemd:
+    name: tailscaled
+    enabled: true
+    state: started
+
+- name: Build Tailscale up flags
+  ansible.builtin.set_fact:
+    tailscale_up_flags: >-
+      {{
+        [
+          '--hostname=' ~ tailscale_hostname,
+          '--accept-dns=' ~ (tailscale_accept_dns | bool | ternary('true', 'false')),
+          '--ssh=' ~ (tailscale_ssh_enabled | bool | ternary('true', 'false'))
+        ]
+        + (
+          ['--advertise-tags=' ~ (tailscale_tags | join(','))]
+          if (tailscale_tags | length > 0)
+          else []
+        )
+      }}
+
+- name: Read Tailscale status
+  ansible.builtin.command:
+    argv:
+      - tailscale
+      - status
+      - --json
+  register: tailscale_status_raw
+  changed_when: false
+  failed_when: false
+
+- name: Parse Tailscale status
+  ansible.builtin.set_fact:
+    tailscale_status: >-
+      {{
+        (tailscale_status_raw.stdout | from_json)
+        if (
+          tailscale_status_raw.rc == 0
+          and (tailscale_status_raw.stdout | default('') | length > 0)
+        )
+        else {}
+      }}
+
+- name: Assert Tailscale auth key is set before first login
+  ansible.builtin.assert:
+    that:
+      - vault_tailscale_auth_key is defined
+      - vault_tailscale_auth_key | length > 0
+      - vault_tailscale_auth_key != 'CHANGE_ME'
+    fail_msg: Tailscale is not logged in and vault_tailscale_auth_key is missing
+  when: tailscale_status.BackendState | default('') != 'Running'
+
+- name: Join the Tailscale tailnet when needed
+  ansible.builtin.command:
+    argv: "{{ ['tailscale', 'up', '--auth-key=' ~ vault_tailscale_auth_key] + tailscale_up_flags }}"
+  no_log: true
+  when: tailscale_status.BackendState | default('') != 'Running'
+  changed_when: true
+
+- name: Reapply Tailscale settings after login
+  ansible.builtin.command:
+    argv: "{{ ['tailscale', 'up'] + tailscale_up_flags }}"
+  when: tailscale_status.BackendState | default('') == 'Running'
+  changed_when: false
+
+- name: Refresh Tailscale status
+  ansible.builtin.command:
+    argv:
+      - tailscale
+      - status
+      - --json
+  register: tailscale_status_final_raw
+  changed_when: false
+
+- name: Parse refreshed Tailscale status
+  ansible.builtin.set_fact:
+    tailscale_status_final: "{{ tailscale_status_final_raw.stdout | from_json }}"
+
+- name: Assert Tailscale is connected
+  ansible.builtin.assert:
+    that:
+      - tailscale_status_final.BackendState == 'Running'
+    fail_msg: Tailscale is not connected after provisioning
+
+- name: Read Tailscale IPv4 address
+  ansible.builtin.command:
+    argv:
+      - tailscale
+      - ip
+      - -4
+  register: tailscale_ipv4_command
+  changed_when: false
+
+- name: Capture Tailscale connection facts
+  ansible.builtin.set_fact:
+    tailscale_ipv4: "{{ tailscale_ipv4_command.stdout_lines[0] | trim }}"
+    tailscale_dns_name: "{{ tailscale_status_final.Self.DNSName | default('') | regex_replace('\\.$', '') }}"
+
+- name: Assert Tailscale IPv4 address was discovered
+  ansible.builtin.assert:
+    that:
+      - tailscale_ipv4 | length > 0
+    fail_msg: Failed to determine the Tailscale IPv4 address for this host

@@ -68,3 +68,4 @@
     state: enabled
     permanent: true
     immediate: true
+  when: not tailscale_private_ssh_effective | default(false) | bool

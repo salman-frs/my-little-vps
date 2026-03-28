@@ -8,6 +8,6 @@ etcd-snapshot-compress: true
 etcd-snapshot-schedule-cron: "{{ k3s_snapshot_schedule }}"
 etcd-snapshot-retention: {{ k3s_snapshot_retention }}
 tls-san:
-{% for san in k3s_tls_sans %}
+{% for san in k3s_server_effective_tls_sans %}
   - "{{ san }}"
 {% endfor %}

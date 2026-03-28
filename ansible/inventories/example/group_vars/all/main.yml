@@ -1,6 +1,18 @@
 ---
 admin_user: admin
 ssh_port: 22
+ssh_hardening_enabled: true
+ssh_allowed_users:
+  - "{{ admin_user }}"
+ssh_password_auth_enabled: false
+ssh_root_login: "no"
+ssh_max_auth_tries: 3
+ssh_max_sessions: 5
+ssh_max_startups: "3:50:10"
+fail2ban_enabled: true
+fail2ban_sshd_maxretry: 5
+fail2ban_sshd_findtime: 10m
+fail2ban_sshd_bantime: 1h
 
 public_ip: REPLACE_ME_PUBLIC_IP
 primary_domain: REPLACE_ME_DOMAIN
@@ -33,6 +45,16 @@ cloudflare_access_enabled: false
 cloudflare_origin_lockdown_enabled: false
 cloudflare_ips_v4_url: https://www.cloudflare.com/ips-v4
 cloudflare_ips_v6_url: https://www.cloudflare.com/ips-v6
+
+tailscale_enabled: false
+tailscale_private_ssh_enabled: false
+tailscale_private_k3s_api_enabled: false
+tailscale_repo_url: https://pkgs.tailscale.com/stable/rhel/9/tailscale.repo
+tailscale_hostname: "{{ k3s_node_name }}"
+tailscale_accept_dns: false
+tailscale_ssh_enabled: false
+tailscale_tags: []
+tailscale_k3s_api_host: ""
 
 validation_namespace: k3s-validation
 validation_certificate_name: dns01-smoke
@@ -69,6 +91,7 @@ base_packages:
   - chrony
   - container-selinux
   - curl
+  - epel-release
   - firewalld
   - git
   - gzip

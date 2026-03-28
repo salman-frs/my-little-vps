@@ -9,9 +9,56 @@
       KUBECONFIG: "{{ k3s_kubeconfig_path }}"
       K3S_CONFIG_FILE: /dev/null
 
+  pre_tasks:
+    - name: Set effective Tailscale private access flags
+      ansible.builtin.set_fact:
+        tailscale_private_ssh_effective: "{{ tailscale_private_ssh_enabled | default(tailscale_private_admin_enabled | default(false)) | bool }}"
+        tailscale_private_k3s_api_effective: "{{ tailscale_private_k3s_api_enabled | default(tailscale_private_admin_enabled | default(false)) | bool }}"
+
   tasks:
     - name: Collect service facts
       ansible.builtin.service_facts:
+
+    - name: Read effective sshd settings
+      ansible.builtin.command: sshd -T
+      changed_when: false
+      register: validate_sshd_settings
+      when: ssh_hardening_enabled | default(true) | bool
+
+    - name: Assert SSH hardening settings
+      ansible.builtin.assert:
+        that:
+          - "'permitrootlogin ' ~ ssh_root_login in validate_sshd_settings.stdout"
+          - "'kbdinteractiveauthentication no' in validate_sshd_settings.stdout"
+          - "'pubkeyauthentication yes' in validate_sshd_settings.stdout"
+          - "'authenticationmethods publickey' in validate_sshd_settings.stdout"
+          - "'maxauthtries ' ~ (ssh_max_auth_tries | string) in validate_sshd_settings.stdout"
+          - "'maxsessions ' ~ (ssh_max_sessions | string) in validate_sshd_settings.stdout"
+          - "'maxstartups ' ~ ssh_max_startups in validate_sshd_settings.stdout"
+          - "'allowusers ' ~ (ssh_allowed_users | join(' ')) in validate_sshd_settings.stdout"
+        fail_msg: sshd is not running with the expected hardening settings
+      when: ssh_hardening_enabled | default(true) | bool
+
+    - name: Assert fail2ban service is running when enabled
+      ansible.builtin.assert:
+        that:
+          - "'fail2ban.service' in ansible_facts.services"
+          - ansible_facts.services['fail2ban.service'].state == 'running'
+        fail_msg: fail2ban.service is not running on the target host
+      when: fail2ban_enabled | default(true) | bool
+
+    - name: Read fail2ban sshd jail status
+      ansible.builtin.command: fail2ban-client status sshd
+      changed_when: false
+      register: validate_fail2ban_sshd
+      when: fail2ban_enabled | default(true) | bool
+
+    - name: Assert fail2ban is managing the sshd jail
+      ansible.builtin.assert:
+        that:
+          - "'Status for the jail: sshd' in validate_fail2ban_sshd.stdout"
+        fail_msg: fail2ban is not managing the sshd jail
+      when: fail2ban_enabled | default(true) | bool
 
     - name: Assert k3s service is running
       ansible.builtin.assert:
@@ -88,11 +135,68 @@
     - name: Assert base firewall state
       ansible.builtin.assert:
         that:
-          - (ssh_port | string) ~ '/tcp' in firewall_ports.stdout
-          - "'6443/tcp' in firewall_ports.stdout"
           - pod_cidr in firewall_sources.stdout
           - service_cidr in firewall_sources.stdout
         fail_msg: firewalld does not expose the expected SSH, API, or trusted CIDR rules
+
+    - name: Read trusted firewall interfaces
+      ansible.builtin.command: firewall-cmd --zone=trusted --list-interfaces
+      changed_when: false
+      register: firewall_trusted_interfaces
+
+    - name: Assert default admin firewall ports when private admin access is disabled
+      ansible.builtin.assert:
+        that:
+          - ((ssh_port | string) ~ '/tcp' in firewall_ports.stdout) == (not tailscale_private_ssh_effective)
+          - ("6443/tcp" in firewall_ports.stdout) == (not tailscale_private_k3s_api_effective)
+        fail_msg: firewalld does not expose the expected admin ports for the selected Tailscale mode
+
+    - name: Assert private admin firewall state when Tailscale is enabled
+      ansible.builtin.assert:
+        that:
+          - "'tailscale0' in firewall_trusted_interfaces.stdout.split()"
+        fail_msg: firewalld is not restricting SSH and the K3s API to the Tailscale interface
+      when: tailscale_private_ssh_effective or tailscale_private_k3s_api_effective
+
+    - name: Assert tailscaled service is running when enabled
+      ansible.builtin.assert:
+        that:
+          - "'tailscaled.service' in ansible_facts.services"
+          - ansible_facts.services['tailscaled.service'].state == 'running'
+        fail_msg: tailscaled.service is not running on the target host
+      when: tailscale_enabled | default(false) | bool
+
+    - name: Read Tailscale status for validation
+      ansible.builtin.command:
+        argv:
+          - tailscale
+          - status
+          - --json
+      changed_when: false
+      register: validation_tailscale_status_raw
+      when: tailscale_enabled | default(false) | bool
+
+    - name: Parse Tailscale status for validation
+      ansible.builtin.set_fact:
+        validation_tailscale_status: "{{ validation_tailscale_status_raw.stdout | from_json }}"
+      when: tailscale_enabled | default(false) | bool
+
+    - name: Assert Tailscale backend is running
+      ansible.builtin.assert:
+        that:
+          - validation_tailscale_status.BackendState == 'Running'
+        fail_msg: Tailscale is enabled but not connected
+      when: tailscale_enabled | default(false) | bool
+
+    - name: Read Tailscale IPv4 address for validation
+      ansible.builtin.command:
+        argv:
+          - tailscale
+          - ip
+          - -4
+      changed_when: false
+      register: validation_tailscale_ipv4
+      when: tailscale_private_k3s_api_effective
 
     - name: Assert default public firewall ports when origin lockdown is disabled
       ansible.builtin.assert:
@@ -215,11 +319,47 @@
       changed_when: false
       register: admin_kubeconfig_check
 
+    - name: Read admin kubeconfig server endpoint
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl config view --minify
+        -o jsonpath={.clusters[0].cluster.server}
+      become: true
+      become_user: "{{ admin_user }}"
+      environment:
+        KUBECONFIG: "/home/{{ admin_user }}/.kube/config"
+        K3S_CONFIG_FILE: /dev/null
+      changed_when: false
+      register: admin_kubeconfig_server
+
     - name: Assert admin kubeconfig can reach the cluster
       ansible.builtin.assert:
         that:
           - admin_kubeconfig_check.stdout == ('node/' ~ k3s_node_name)
         fail_msg: Admin kubeconfig could not read the target node
+
+    - name: Assert admin kubeconfig uses the expected API host
+      ansible.builtin.assert:
+        that:
+          - admin_kubeconfig_server.stdout == ('https://' ~ expected_admin_kubeconfig_host ~ ':6443')
+        fail_msg: Admin kubeconfig does not use the expected K3s API host
+      vars:
+        expected_admin_kubeconfig_host: >-
+          {{
+            tailscale_k3s_api_host
+            if (
+              tailscale_enabled | default(false) | bool
+              and tailscale_private_k3s_api_effective | default(false) | bool
+              and (tailscale_k3s_api_host | default('') | length > 0)
+            )
+            else (
+              validation_tailscale_ipv4.stdout_lines[0] | trim
+              if (
+                tailscale_enabled | default(false) | bool
+                and tailscale_private_k3s_api_effective | default(false) | bool
+              )
+              else k3s_api_host
+            )
+          }}
 
     - name: Wait for OpenClaw deployment rollout
       ansible.builtin.command: >-
