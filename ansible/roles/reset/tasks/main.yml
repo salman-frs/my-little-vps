@@ -46,6 +46,74 @@
     - "{{ service_cidr }}"
   failed_when: false
 
+- name: Fetch Cloudflare IPv4 ranges for firewall cleanup
+  ansible.builtin.uri:
+    url: "{{ cloudflare_ips_v4_url }}"
+    return_content: true
+  register: reset_cloudflare_ips_v4
+  changed_when: false
+  failed_when: false
+  when: cloudflare_origin_lockdown_enabled | bool
+
+- name: Fetch Cloudflare IPv6 ranges for firewall cleanup
+  ansible.builtin.uri:
+    url: "{{ cloudflare_ips_v6_url }}"
+    return_content: true
+  register: reset_cloudflare_ips_v6
+  changed_when: false
+  failed_when: false
+  when: cloudflare_origin_lockdown_enabled | bool
+
+- name: Parse Cloudflare IP ranges for firewall cleanup
+  ansible.builtin.set_fact:
+    reset_cloudflare_ipv4_ranges: >-
+      {{
+        reset_cloudflare_ips_v4.content.splitlines()
+        | map('trim')
+        | reject('equalto', '')
+        | reject('match', '^#')
+        | list
+        if (reset_cloudflare_ips_v4 is defined and reset_cloudflare_ips_v4.status | default(0) == 200)
+        else []
+      }}
+    reset_cloudflare_ipv6_ranges: >-
+      {{
+        reset_cloudflare_ips_v6.content.splitlines()
+        | map('trim')
+        | reject('equalto', '')
+        | reject('match', '^#')
+        | list
+        if (reset_cloudflare_ips_v6 is defined and reset_cloudflare_ips_v6.status | default(0) == 200)
+        else []
+      }}
+  when: cloudflare_origin_lockdown_enabled | bool
+
+- name: Remove Cloudflare IPv4-only ingress rules
+  ansible.posix.firewalld:
+    zone: public
+    rich_rule: >-
+      rule family="ipv4" source address="{{ item.0 }}"
+      port port="{{ item.1 }}" protocol="tcp" accept
+    state: disabled
+    permanent: true
+    immediate: true
+  loop: "{{ reset_cloudflare_ipv4_ranges | product(['80', '443']) | list }}"
+  failed_when: false
+  when: cloudflare_origin_lockdown_enabled | bool
+
+- name: Remove Cloudflare IPv6-only ingress rules
+  ansible.posix.firewalld:
+    zone: public
+    rich_rule: >-
+      rule family="ipv6" source address="{{ item.0 }}"
+      port port="{{ item.1 }}" protocol="tcp" accept
+    state: disabled
+    permanent: true
+    immediate: true
+  loop: "{{ reset_cloudflare_ipv6_ranges | product(['80', '443']) | list }}"
+  failed_when: false
+  when: cloudflare_origin_lockdown_enabled | bool
+
 - name: Reload systemd after cleanup
   ansible.builtin.systemd:
     daemon_reload: true

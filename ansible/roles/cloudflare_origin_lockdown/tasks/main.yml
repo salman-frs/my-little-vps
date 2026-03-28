@@ -1,0 +1,72 @@
+---
+- name: Fetch Cloudflare IPv4 ranges for origin lockdown
+  ansible.builtin.uri:
+    url: "{{ cloudflare_ips_v4_url }}"
+    return_content: true
+  register: cloudflare_origin_lockdown_ips_v4
+  changed_when: false
+
+- name: Fetch Cloudflare IPv6 ranges for origin lockdown
+  ansible.builtin.uri:
+    url: "{{ cloudflare_ips_v6_url }}"
+    return_content: true
+  register: cloudflare_origin_lockdown_ips_v6
+  changed_when: false
+
+- name: Parse Cloudflare IP ranges for origin lockdown
+  ansible.builtin.set_fact:
+    cloudflare_origin_lockdown_ipv4_ranges: >-
+      {{
+        cloudflare_origin_lockdown_ips_v4.content.splitlines()
+        | map('trim')
+        | reject('equalto', '')
+        | reject('match', '^#')
+        | list
+      }}
+    cloudflare_origin_lockdown_ipv6_ranges: >-
+      {{
+        cloudflare_origin_lockdown_ips_v6.content.splitlines()
+        | map('trim')
+        | reject('equalto', '')
+        | reject('match', '^#')
+        | list
+      }}
+
+- name: Assert Cloudflare IP ranges were fetched
+  ansible.builtin.assert:
+    that:
+      - cloudflare_origin_lockdown_ipv4_ranges | length > 0
+      - cloudflare_origin_lockdown_ipv6_ranges | length > 0
+    fail_msg: Failed to fetch Cloudflare IP ranges for origin lockdown
+
+- name: Remove global HTTP and HTTPS firewall ports
+  ansible.posix.firewalld:
+    port: "{{ item }}/tcp"
+    state: disabled
+    permanent: true
+    immediate: true
+  loop:
+    - "80"
+    - "443"
+
+- name: Allow Cloudflare IPv4 HTTP and HTTPS ingress
+  ansible.posix.firewalld:
+    zone: public
+    rich_rule: >-
+      rule family="ipv4" source address="{{ item.0 }}"
+      port port="{{ item.1 }}" protocol="tcp" accept
+    state: enabled
+    permanent: true
+    immediate: true
+  loop: "{{ cloudflare_origin_lockdown_ipv4_ranges | product(['80', '443']) | list }}"
+
+- name: Allow Cloudflare IPv6 HTTP and HTTPS ingress
+  ansible.posix.firewalld:
+    zone: public
+    rich_rule: >-
+      rule family="ipv6" source address="{{ item.0 }}"
+      port port="{{ item.1 }}" protocol="tcp" accept
+    state: enabled
+    permanent: true
+    immediate: true
+  loop: "{{ cloudflare_origin_lockdown_ipv6_ranges | product(['80', '443']) | list }}"

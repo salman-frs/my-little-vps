@@ -13,7 +13,9 @@ in a local personal inventory outside Git.
 The repository covers the practical parts of running a small K3s server:
 host provisioning, cluster installation, ingress through Traefik, optional
 certificate management with cert-manager and Cloudflare DNS-01, and validation
-playbooks for checking the resulting system.
+playbooks for checking the resulting system. Cloudflare Access configuration
+for public-facing applications can live in the Terraform workspace under
+`terraform/`.
 
 Operational details live under [`ansible/`](./ansible/). The root README is the
 front door for the repository; the operator guide contains the working
@@ -31,7 +33,7 @@ To create a working local inventory from a fresh clone:
 python3 -m venv .venv
 . .venv/bin/activate
 cd ansible
-python -m pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ansible-galaxy collection install -r requirements.yml
 cp -R inventories/example inventories/personal
 cp inventories/example/group_vars/all/vault.example.yml inventories/personal/group_vars/all/vault.yml
@@ -68,6 +70,7 @@ ansible-playbook -i inventories/personal/hosts.yml --ask-vault-pass playbooks/va
 
 - [`ansible/`](./ansible/) contains the automation workspace
 - [`ansible/README.md`](./ansible/README.md) is the operator-facing guide
+- `terraform/cloudflare-access/` contains Cloudflare Access and DNS automation
 - `ansible/inventories/example/` is the committed baseline inventory
 - `ansible/inventories/personal/` is the local working inventory for a real host
 

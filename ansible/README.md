@@ -17,7 +17,7 @@ From the repository root:
 python3 -m venv .venv
 . .venv/bin/activate
 cd ansible
-python -m pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ansible-galaxy collection install -r requirements.yml
 ```
 
@@ -60,7 +60,14 @@ Keep the boundary clean:
 Quick check before pushing:
 
 ```bash
-git ls-files | xargs rg -n 'REPLACE_ME|CHANGE_ME' || true
+git status --short
+git check-ignore ansible/.vault_pass \
+  inventories/personal/hosts.yml \
+  inventories/personal/group_vars/all/main.yml \
+  inventories/personal/group_vars/all/vault.yml \
+  ../terraform/cloudflare-access/terraform.tfvars \
+  ../terraform/cloudflare-access/openclaw-origin-ca.crt.pem \
+  ../terraform/cloudflare-access/openclaw-origin-ca.key.pem
 ```
 
 ----
@@ -110,6 +117,9 @@ What they do:
 
 - `cert_manager_enabled`: install cert-manager when `true`
 - `acme_dns_provider`: set to `cloudflare` to enable Cloudflare-backed DNS-01 issuers
+- `cloudflare_access_enabled`: expect the public hostname to be protected by Cloudflare Access
+- `cloudflare_origin_lockdown_enabled`: allow `80/tcp` and `443/tcp` only from Cloudflare IP ranges
+- `cloudflare_ips_v4_url` and `cloudflare_ips_v6_url`: source URLs for Cloudflare origin allowlists
 - `validation_run_tls_smoke`: issue a temporary ACME smoke certificate during validation when `true`
 - `openclaw_enabled`: deploy OpenClaw into the cluster when `true`
 
@@ -123,7 +133,8 @@ until you turn them on explicitly.
 
 When `openclaw_enabled: true`, the provision playbook applies a repo-managed
 manifest bundle into the `openclaw` namespace. The deployment is exposed through
-Traefik and can request a certificate from the configured ClusterIssuer.
+Traefik and can either request a certificate from the configured ClusterIssuer
+or load a Cloudflare Origin CA certificate from local PEM files.
 
 Set these non-secret vars in `inventories/personal/group_vars/all/main.yml`:
 
@@ -137,6 +148,10 @@ Set these non-secret vars in `inventories/personal/group_vars/all/main.yml`:
 - `openclaw_gateway_allow_real_ip_fallback`
 - `openclaw_model_primary`
 - `openclaw_clusterissuer`
+- `openclaw_tls_mode`
+- `openclaw_tls_secret_name`
+- `openclaw_origin_ca_certificate_path`
+- `openclaw_origin_ca_private_key_path`
 - `openclaw_web_enabled`
 - `openclaw_web_heartbeat_seconds`
 - `openclaw_whatsapp_enabled`
@@ -160,6 +175,18 @@ kubectl -n openclaw exec -it deployment/openclaw -- sh -lc 'openclaw models stat
 
 The OpenClaw home directory lives on the PVC, so OAuth credentials survive pod
 restarts and rollouts.
+
+OpenClaw supports two origin TLS modes:
+
+- `openclaw_tls_mode: letsencrypt` keeps the cert-manager DNS-01 flow through
+  `openclaw_clusterissuer`
+- `openclaw_tls_mode: cloudflare_origin_ca` loads a Cloudflare Origin CA
+  certificate from local PEM files and stores it in the Kubernetes TLS secret
+
+In `cloudflare_origin_ca` mode, browsers still see the Cloudflare edge
+certificate. The Origin CA certificate secures only the Cloudflare to origin
+hop, so direct browser access to the OpenClaw hostname without Cloudflare is
+not a supported path.
 
 If `vault_openclaw_zai_api_key` is present, the deployment also injects
 `ZAI_API_KEY` into the gateway container. That enables GLM models through the
@@ -190,7 +217,7 @@ Useful checks after deploy:
 
 ```bash
 . ../.venv/bin/activate
-kubectl -n openclaw get pvc,svc,ingress,certificate
+kubectl -n openclaw get pvc,svc,ingress,secret openclaw-tls
 kubectl -n openclaw rollout status deployment/openclaw
 kubectl -n openclaw logs deployment/openclaw --tail=100
 kubectl -n openclaw exec -it deployment/openclaw -- sh -lc 'openclaw channels status || true'
@@ -204,3 +231,33 @@ kubectl -n openclaw get secret openclaw-secrets -o jsonpath='{.data.OPENCLAW_GAT
 
 Cloudflare support is optional. If you do not use it, leave
 `acme_dns_provider` as `none` and keep `validation_run_tls_smoke` disabled.
+
+----
+
+## Cloudflare Access for OpenClaw
+
+Cloudflare Access lives in the Terraform workspace under
+`../terraform/cloudflare-access/`. Use Terraform for:
+
+- the OTP identity provider
+- the self-hosted Access application
+- the Access allow policy for the approved email address
+- the proxied DNS record if you want Terraform to own that hostname
+- the OpenClaw Origin CA certificate and local PEM files
+
+Recommended rollout order:
+
+1. apply the Terraform workspace
+2. verify `https://openclaw.<domain>` shows the Cloudflare Access login page
+3. set `cloudflare_access_enabled: true`
+4. set `cloudflare_origin_lockdown_enabled: true`
+5. rerun `playbooks/provision.yml`
+6. rerun `playbooks/validate.yml`
+
+When Access is enabled, the public hostname should redirect unauthenticated
+requests to `*.cloudflareaccess.com`. OpenClaw still keeps its gateway token as
+the second auth layer after Access login.
+
+The origin lockdown applies to the whole VPS web ingress, not just OpenClaw.
+Once enabled, direct origin-IP access to `80/tcp` and `443/tcp` should fail for
+non-Cloudflare clients.

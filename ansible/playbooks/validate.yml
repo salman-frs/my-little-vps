@@ -42,6 +42,21 @@
         - local-path-provisioner
         - traefik
 
+    - name: Read Traefik external traffic policy
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl -n kube-system get service traefik
+        -o jsonpath={.spec.externalTrafficPolicy}
+      environment: "{{ kube_env }}"
+      changed_when: false
+      register: traefik_external_traffic_policy
+
+    - name: Assert Traefik preserves source IPs when Cloudflare Access is enabled
+      ansible.builtin.assert:
+        that:
+          - traefik_external_traffic_policy.stdout == 'Local'
+        fail_msg: Traefik is not preserving source IPs while Cloudflare Access is enabled
+      when: cloudflare_access_enabled | bool
+
     - name: Wait for cert-manager deployments to be healthy
       ansible.builtin.command: >-
         /usr/local/bin/kubectl -n {{ cert_manager_namespace }} rollout status
@@ -65,16 +80,105 @@
       changed_when: false
       register: firewall_sources
 
-    - name: Assert firewall state
+    - name: Read public rich firewall rules
+      ansible.builtin.command: firewall-cmd --zone=public --list-rich-rules
+      changed_when: false
+      register: firewall_public_rich_rules
+
+    - name: Assert base firewall state
       ansible.builtin.assert:
         that:
           - (ssh_port | string) ~ '/tcp' in firewall_ports.stdout
-          - "'80/tcp' in firewall_ports.stdout"
-          - "'443/tcp' in firewall_ports.stdout"
           - "'6443/tcp' in firewall_ports.stdout"
           - pod_cidr in firewall_sources.stdout
           - service_cidr in firewall_sources.stdout
-        fail_msg: firewalld does not expose the expected ports or trusted CIDRs
+        fail_msg: firewalld does not expose the expected SSH, API, or trusted CIDR rules
+
+    - name: Assert default public firewall ports when origin lockdown is disabled
+      ansible.builtin.assert:
+        that:
+          - "'80/tcp' in firewall_ports.stdout"
+          - "'443/tcp' in firewall_ports.stdout"
+        fail_msg: firewalld does not expose the expected public HTTP and HTTPS ports
+      when: not cloudflare_origin_lockdown_enabled | bool
+
+    - name: Fetch Cloudflare IPv4 ranges for validation
+      ansible.builtin.uri:
+        url: "{{ cloudflare_ips_v4_url }}"
+        return_content: true
+      register: validation_cloudflare_ips_v4
+      changed_when: false
+      when: cloudflare_origin_lockdown_enabled | bool
+
+    - name: Fetch Cloudflare IPv6 ranges for validation
+      ansible.builtin.uri:
+        url: "{{ cloudflare_ips_v6_url }}"
+        return_content: true
+      register: validation_cloudflare_ips_v6
+      changed_when: false
+      when: cloudflare_origin_lockdown_enabled | bool
+
+    - name: Parse Cloudflare IP ranges for validation
+      ansible.builtin.set_fact:
+        validation_cloudflare_ipv4_ranges: >-
+          {{
+            validation_cloudflare_ips_v4.content.splitlines()
+            | map('trim')
+            | reject('equalto', '')
+            | reject('match', '^#')
+            | list
+          }}
+        validation_cloudflare_ipv6_ranges: >-
+          {{
+            validation_cloudflare_ips_v6.content.splitlines()
+            | map('trim')
+            | reject('equalto', '')
+            | reject('match', '^#')
+            | list
+          }}
+      when: cloudflare_origin_lockdown_enabled | bool
+
+    - name: Query public firewall HTTP port state
+      ansible.builtin.command: firewall-cmd --zone=public --query-port=80/tcp
+      changed_when: false
+      failed_when: false
+      register: firewall_public_http_enabled
+      when: cloudflare_origin_lockdown_enabled | bool
+
+    - name: Query public firewall HTTPS port state
+      ansible.builtin.command: firewall-cmd --zone=public --query-port=443/tcp
+      changed_when: false
+      failed_when: false
+      register: firewall_public_https_enabled
+      when: cloudflare_origin_lockdown_enabled | bool
+
+    - name: Assert origin lockdown removes global HTTP and HTTPS ports
+      ansible.builtin.assert:
+        that:
+          - firewall_public_http_enabled.stdout == 'no'
+          - firewall_public_https_enabled.stdout == 'no'
+          - validation_cloudflare_ipv4_ranges | length > 0
+          - validation_cloudflare_ipv6_ranges | length > 0
+        fail_msg: firewalld did not switch to Cloudflare-only origin access rules
+      when: cloudflare_origin_lockdown_enabled | bool
+
+    - name: Assert Cloudflare IPv4 ingress rules exist for HTTP and HTTPS
+      ansible.builtin.assert:
+        that:
+          - ('source address="' ~ item ~ '" port port="80" protocol="tcp" accept') in firewall_public_rich_rules.stdout
+          - ('source address="' ~ item ~ '" port port="443" protocol="tcp" accept') in firewall_public_rich_rules.stdout
+        fail_msg: Missing Cloudflare IPv4 ingress rule for {{ item }}
+      loop: "{{ validation_cloudflare_ipv4_ranges }}"
+      when: cloudflare_origin_lockdown_enabled | bool
+
+    - name: Assert Cloudflare IPv6 ingress rules exist for HTTP and HTTPS
+      ansible.builtin.assert:
+        that:
+          - ('source address="' ~ item ~ '" port port="80" protocol="tcp" accept') in firewall_public_rich_rules.stdout
+          - ('source address="' ~ item ~ '" port port="443" protocol="tcp" accept') in firewall_public_rich_rules.stdout
+        fail_msg: Missing Cloudflare IPv6 ingress rule for {{ item }}
+      loop: "{{ validation_cloudflare_ipv6_ranges }}"
+      when: cloudflare_origin_lockdown_enabled | bool
 
     - name: Verify etcd snapshots are available
       ansible.builtin.set_fact:
@@ -146,11 +250,13 @@
       ansible.builtin.command: >-
         /usr/local/bin/kubectl -n {{ openclaw_namespace }} wait
         --for=condition=Ready
-        certificate/openclaw-tls
+        certificate/{{ openclaw_tls_secret_name }}
         --timeout=900s
       environment: "{{ kube_env }}"
       changed_when: false
-      when: openclaw_enabled | bool
+      when:
+        - openclaw_enabled | bool
+        - openclaw_tls_mode == 'letsencrypt'
 
     - name: Read OpenClaw ingress host
       ansible.builtin.command: >-
@@ -185,7 +291,7 @@
 
     - name: Assert OpenClaw TLS secret exists
       ansible.builtin.command: >-
-        /usr/local/bin/kubectl -n {{ openclaw_namespace }} get secret openclaw-tls -o name
+        /usr/local/bin/kubectl -n {{ openclaw_namespace }} get secret {{ openclaw_tls_secret_name }} -o name
       environment: "{{ kube_env }}"
       changed_when: false
       register: openclaw_tls_secret_check
@@ -194,9 +300,53 @@
     - name: Assert OpenClaw TLS secret name
       ansible.builtin.assert:
         that:
-          - openclaw_tls_secret_check.stdout == 'secret/openclaw-tls'
+          - openclaw_tls_secret_check.stdout == ('secret/' ~ openclaw_tls_secret_name)
         fail_msg: OpenClaw TLS secret is missing
       when: openclaw_enabled | bool
+
+    - name: Read OpenClaw Origin CA certificate issuer
+      ansible.builtin.shell: >-
+        /usr/local/bin/kubectl -n {{ openclaw_namespace }} get secret {{ openclaw_tls_secret_name }}
+        -o jsonpath='{.data.tls\.crt}'
+        | base64 -d
+        | openssl x509 -noout -issuer
+      environment: "{{ kube_env }}"
+      changed_when: false
+      register: openclaw_origin_ca_issuer
+      when:
+        - openclaw_enabled | bool
+        - openclaw_tls_mode == 'cloudflare_origin_ca'
+
+    - name: Assert OpenClaw uses Cloudflare Origin CA
+      ansible.builtin.assert:
+        that:
+          - '"cloudflare" in (openclaw_origin_ca_issuer.stdout | lower)'
+          - '"origin" in (openclaw_origin_ca_issuer.stdout | lower)'
+        fail_msg: OpenClaw TLS secret is not backed by a Cloudflare Origin CA certificate
+      when:
+        - openclaw_enabled | bool
+        - openclaw_tls_mode == 'cloudflare_origin_ca'
+
+    - name: Check that cert-manager OpenClaw certificate is absent in Cloudflare Origin CA mode
+      ansible.builtin.command: >-
+        /usr/local/bin/kubectl -n {{ openclaw_namespace }} get
+        certificate/{{ openclaw_tls_secret_name }}
+      environment: "{{ kube_env }}"
+      changed_when: false
+      failed_when: false
+      register: openclaw_certificate_resource_check
+      when:
+        - openclaw_enabled | bool
+        - openclaw_tls_mode == 'cloudflare_origin_ca'
+
+    - name: Assert cert-manager is not managing OpenClaw TLS in Cloudflare Origin CA mode
+      ansible.builtin.assert:
+        that:
+          - openclaw_certificate_resource_check.rc != 0
+        fail_msg: cert-manager Certificate still exists for OpenClaw while cloudflare_origin_ca mode is enabled
+      when:
+        - openclaw_enabled | bool
+        - openclaw_tls_mode == 'cloudflare_origin_ca'
 
     - name: Check OpenClaw local health endpoint
       ansible.builtin.command: >-
@@ -224,14 +374,70 @@
       changed_when: false
       when: openclaw_enabled | bool
 
-    - name: Check OpenClaw public HTTPS endpoint
+    - name: Check OpenClaw public HTTPS endpoint without Cloudflare Access
       ansible.builtin.uri:
         url: "https://{{ openclaw_host }}/"
         method: GET
         status_code: 200
         return_content: false
       changed_when: false
-      when: openclaw_enabled | bool
+      when:
+        - openclaw_enabled | bool
+        - not cloudflare_access_enabled | bool
+
+    - name: Check OpenClaw public hostname redirects to Cloudflare Access
+      ansible.builtin.uri:
+        url: "https://{{ openclaw_host }}/"
+        method: GET
+        follow_redirects: none
+        status_code:
+          - 302
+          - 303
+        return_content: false
+      register: openclaw_access_redirect
+      changed_when: false
+      when:
+        - openclaw_enabled | bool
+        - cloudflare_access_enabled | bool
+
+    - name: Assert Cloudflare Access is protecting OpenClaw
+      ansible.builtin.assert:
+        that:
+          - openclaw_access_redirect.location is defined
+          - '".cloudflareaccess.com" in openclaw_access_redirect.location'
+        fail_msg: OpenClaw hostname did not redirect to a Cloudflare Access login flow
+      when:
+        - openclaw_enabled | bool
+        - cloudflare_access_enabled | bool
+
+    - name: Check direct OpenClaw origin bypass attempt
+      ansible.builtin.command:
+        argv:
+          - curl
+          - -k
+          - -I
+          - -sS
+          - --connect-timeout
+          - "10"
+          - --resolve
+          - "{{ openclaw_host }}:443:{{ public_ip }}"
+          - "https://{{ openclaw_host }}"
+      delegate_to: localhost
+      become: false
+      register: openclaw_direct_origin_bypass_check
+      changed_when: false
+      when:
+        - openclaw_enabled | bool
+        - cloudflare_access_enabled | bool
+
+    - name: Assert direct OpenClaw origin bypass is blocked
+      ansible.builtin.assert:
+        that:
+          - "'HTTP/2 403' in openclaw_direct_origin_bypass_check.stdout or 'HTTP/1.1 403' in openclaw_direct_origin_bypass_check.stdout"
+        fail_msg: Direct origin access with the OpenClaw hostname is still possible
+      when:
+        - openclaw_enabled | bool
+        - cloudflare_access_enabled | bool
 
     - name: Assert OpenClaw openai provider plugin is loaded
       ansible.builtin.shell: >-

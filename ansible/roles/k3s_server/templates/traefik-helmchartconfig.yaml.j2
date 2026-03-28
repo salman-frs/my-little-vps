@@ -1,0 +1,25 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    service:
+      spec:
+        externalTrafficPolicy: {{ ('Local' if cloudflare_access_enabled | bool else 'Cluster') | quote }}
+{% if cloudflare_access_enabled | bool %}
+    ports:
+      web:
+        forwardedHeaders:
+          trustedIPs:
+{% for cidr in (k3s_server_cloudflare_ipv4_ranges + k3s_server_cloudflare_ipv6_ranges) %}
+            - {{ cidr | quote }}
+{% endfor %}
+      websecure:
+        forwardedHeaders:
+          trustedIPs:
+{% for cidr in (k3s_server_cloudflare_ipv4_ranges + k3s_server_cloudflare_ipv6_ranges) %}
+            - {{ cidr | quote }}
+{% endfor %}
+{% endif %}

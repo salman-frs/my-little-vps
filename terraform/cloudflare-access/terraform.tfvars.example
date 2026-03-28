@@ -1,0 +1,15 @@
+# Access app/policy management plus Origin CA issuance require a token that can
+# manage Zero Trust resources and edit Zone SSL/Certificates on the zone that
+# owns openclaw_hostname.
+cloudflare_api_token            = "CHANGE_ME"
+cloudflare_account_id           = "CHANGE_ME"
+cloudflare_zone_id              = "CHANGE_ME"
+cloudflare_zero_trust_team_name = "CHANGE_ME"
+openclaw_access_email           = "CHANGE_ME@example.com"
+openclaw_hostname               = "openclaw.example.com"
+openclaw_access_session_duration = "24h"
+existing_one_time_pin_idp_id    = ""
+manage_openclaw_dns_record      = false
+openclaw_origin_ip              = "203.0.113.10"
+openclaw_origin_ca_request_type = "origin-ecc"
+openclaw_origin_ca_requested_validity = 5475

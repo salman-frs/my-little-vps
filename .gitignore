@@ -16,5 +16,15 @@ ansible/inventories/personal/
 *.tar.gz
 *.tar
 
+# Terraform local state and secrets
+terraform/**/.terraform/
+terraform/**/*.tfstate
+terraform/**/*.tfstate.*
+terraform/**/*.tfvars
+terraform/**/*.tfvars.json
+terraform/**/crash.log
+terraform/**/openclaw-origin-ca.crt.pem
+terraform/**/openclaw-origin-ca.key.pem
+
 # Ansible retry files
 *.retry

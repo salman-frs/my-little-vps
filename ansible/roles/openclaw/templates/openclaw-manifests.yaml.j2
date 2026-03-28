@@ -9,10 +9,22 @@ metadata:
   name: openclaw-secrets
   namespace: {{ openclaw_namespace }}
 type: Opaque
-stringData:
-  OPENCLAW_GATEWAY_TOKEN: {{ vault_openclaw_gateway_token | quote }}
+data:
+  OPENCLAW_GATEWAY_TOKEN: {{ vault_openclaw_gateway_token | b64encode }}
 {% if vault_openclaw_zai_api_key is defined and vault_openclaw_zai_api_key | length > 0 and vault_openclaw_zai_api_key != 'CHANGE_ME' %}
-  ZAI_API_KEY: {{ vault_openclaw_zai_api_key | quote }}
+  ZAI_API_KEY: {{ vault_openclaw_zai_api_key | b64encode }}
+{% endif %}
+{% if openclaw_tls_mode == 'cloudflare_origin_ca' %}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ openclaw_tls_secret_name }}
+  namespace: {{ openclaw_namespace }}
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ lookup('file', openclaw_origin_ca_certificate_path) | b64encode }}
+  tls.key: {{ lookup('file', openclaw_origin_ca_private_key_path) | b64encode }}
 {% endif %}
 ---
 apiVersion: v1
@@ -387,6 +399,21 @@ spec:
       port: {{ openclaw_gateway_port }}
       targetPort: {{ openclaw_gateway_port }}
       protocol: TCP
+{% if cloudflare_access_enabled | bool %}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: openclaw-cloudflare-allowlist
+  namespace: {{ openclaw_namespace }}
+spec:
+  ipAllowList:
+    rejectStatusCode: 403
+    sourceRange:
+{% for cidr in (openclaw_cloudflare_ipv4_ranges + openclaw_cloudflare_ipv6_ranges) %}
+      - {{ cidr | quote }}
+{% endfor %}
+{% endif %}
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -394,15 +421,20 @@ metadata:
   name: openclaw
   namespace: {{ openclaw_namespace }}
   annotations:
+{% if openclaw_tls_mode == 'letsencrypt' %}
     cert-manager.io/cluster-issuer: {{ openclaw_clusterissuer | quote }}
+{% endif %}
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.tls: "true"
+{% if cloudflare_access_enabled | bool %}
+    traefik.ingress.kubernetes.io/router.middlewares: {{ (openclaw_namespace ~ '-openclaw-cloudflare-allowlist@kubernetescrd') | quote }}
+{% endif %}
 spec:
   ingressClassName: traefik
   tls:
     - hosts:
         - {{ openclaw_host }}
-      secretName: openclaw-tls
+      secretName: {{ openclaw_tls_secret_name }}
   rules:
     - host: {{ openclaw_host }}
       http:

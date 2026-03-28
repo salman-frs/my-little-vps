@@ -29,6 +29,10 @@ letsencrypt_email: REPLACE_ME_EMAIL
 acme_dns_provider: none
 cloudflare_api_token_secret_name: cloudflare-api-token
 cloudflare_api_token_secret_key: api-token
+cloudflare_access_enabled: false
+cloudflare_origin_lockdown_enabled: false
+cloudflare_ips_v4_url: https://www.cloudflare.com/ips-v4
+cloudflare_ips_v6_url: https://www.cloudflare.com/ips-v6
 
 validation_namespace: k3s-validation
 validation_certificate_name: dns01-smoke
@@ -46,6 +50,10 @@ openclaw_gateway_trusted_proxies: []
 openclaw_gateway_allow_real_ip_fallback: false
 openclaw_model_primary: openai-codex/gpt-5.4
 openclaw_clusterissuer: letsencrypt-prod
+openclaw_tls_mode: letsencrypt
+openclaw_tls_secret_name: openclaw-tls
+openclaw_origin_ca_certificate_path: "{{ playbook_dir | dirname | dirname }}/terraform/cloudflare-access/openclaw-origin-ca.crt.pem"
+openclaw_origin_ca_private_key_path: "{{ playbook_dir | dirname | dirname }}/terraform/cloudflare-access/openclaw-origin-ca.key.pem"
 openclaw_web_enabled: false
 openclaw_web_heartbeat_seconds: 60
 openclaw_whatsapp_enabled: false

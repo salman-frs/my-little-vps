@@ -15,3 +15,5 @@
         - acme_dns_provider == 'cloudflare'
     - role: openclaw
       when: openclaw_enabled | bool
+    - role: cloudflare_origin_lockdown
+      when: cloudflare_origin_lockdown_enabled | bool
